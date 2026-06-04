@@ -160,48 +160,80 @@ class LoggingCog(commands.Cog):
             f"💬 **메시지 작성** `{today_str()} {time_str()}`\n"
             f"**채널:** {self.fmt_channel(message.channel)}\n"
             f"**작성자:** {self.fmt_member(message.author)}\n"
+            f"**메시지 ID:** `{message.id}`\n"
             f"**내용:** {content}"
         )
 
     # ── 메시지 삭제 ───────────────────────────────────────────────
 
     @commands.Cog.listener()
-    async def on_message_delete(self, message: discord.Message):
-        if message.author.bot:
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
+        if not payload.guild_id or not self.is_source_guild(payload.guild_id):
             return
-        if not message.guild or not self.is_source_guild(message.guild.id):
-            return
-        content = (message.content or "*(첨부파일 또는 내용 없음)*")[:1800]
-        created_kst = message.created_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
-        await self.log(
-            f"🗑️ **메시지 삭제** `{today_str()} {time_str()}`\n"
-            f"**채널:** {self.fmt_channel(message.channel)}\n"
-            f"**작성자:** {self.fmt_member(message.author)}\n"
-            f"**내용:** {content}\n"
-            f"**메시지 작성 시간:** `{created_kst}`"
-        )
+        channel = self.bot.get_channel(payload.channel_id)
+        channel_str = self.fmt_channel(channel) if channel else f"`{payload.channel_id}`"
+
+        cached = payload.cached_message
+        if cached:
+            if cached.author.bot:
+                return
+            content = (cached.content or "*(첨부파일 또는 내용 없음)*")[:1800]
+            created_kst = cached.created_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+            await self.log(
+                f"🗑️ **메시지 삭제** `{today_str()} {time_str()}`\n"
+                f"**채널:** {channel_str}\n"
+                f"**작성자:** {self.fmt_member(cached.author)}\n"
+                f"**메시지 ID:** `{payload.message_id}`\n"
+                f"**내용:** {content}\n"
+                f"**메시지 작성 시간:** `{created_kst}`"
+            )
+        else:
+            await self.log(
+                f"🗑️ **메시지 삭제** `{today_str()} {time_str()}`\n"
+                f"**채널:** {channel_str}\n"
+                f"**메시지 ID:** `{payload.message_id}`\n"
+                f"**내용:** *(캐시에 없는 메시지)*"
+            )
 
     # ── 메시지 수정 ───────────────────────────────────────────────
 
     @commands.Cog.listener()
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        if before.author.bot:
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        if not payload.guild_id or not self.is_source_guild(payload.guild_id):
             return
-        if not before.guild or not self.is_source_guild(before.guild.id):
-            return
-        if before.content == after.content:
-            return
-        before_content = before.content[:800]
-        after_content = after.content[:800]
-        created_kst = before.created_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
-        await self.log(
-            f"✏️ **메시지 수정** `{today_str()} {time_str()}`\n"
-            f"**채널:** {self.fmt_channel(before.channel)}\n"
-            f"**작성자:** {self.fmt_member(before.author)}\n"
-            f"**수정 전:** {before_content}\n"
-            f"**수정 후:** {after_content}\n"
-            f"**메시지 작성 시간:** `{created_kst}`"
-        )
+        channel = self.bot.get_channel(payload.channel_id)
+        channel_str = self.fmt_channel(channel) if channel else f"`{payload.channel_id}`"
+
+        cached = payload.cached_message
+        if cached:
+            if cached.author.bot:
+                return
+            # 내용이 실제로 바뀐 경우만 로깅
+            new_content = payload.data.get("content", "")
+            if cached.content == new_content:
+                return
+            before_content = cached.content[:800]
+            after_content = new_content[:800]
+            created_kst = cached.created_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+            await self.log(
+                f"✏️ **메시지 수정** `{today_str()} {time_str()}`\n"
+                f"**채널:** {channel_str}\n"
+                f"**작성자:** {self.fmt_member(cached.author)}\n"
+                f"**메시지 ID:** `{payload.message_id}`\n"
+                f"**수정 전:** {before_content}\n"
+                f"**수정 후:** {after_content}\n"
+                f"**메시지 작성 시간:** `{created_kst}`"
+            )
+        else:
+            new_content = payload.data.get("content", "*(알 수 없음)*")[:800]
+            # 봇 메시지 여부는 캐시 없으면 확인 불가 — author.bot 체크 생략
+            await self.log(
+                f"✏️ **메시지 수정** `{today_str()} {time_str()}`\n"
+                f"**채널:** {channel_str}\n"
+                f"**메시지 ID:** `{payload.message_id}`\n"
+                f"**수정 전:** *(캐시에 없는 메시지)*\n"
+                f"**수정 후:** {new_content}"
+            )
 
     # ── 멤버 입장 ─────────────────────────────────────────────────
 
