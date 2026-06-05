@@ -138,7 +138,7 @@ class LoggingCog(commands.Cog):
     @staticmethod
     def fmt_role(role: discord.Role) -> str:
         """역할 멘션 + 이름. 삭제된 역할도 이름이 남아 있으므로 항상 표시."""
-        return f"{role.mention} (`{role.name}`)"
+        return f"(`{role.name}`)"
 
     @staticmethod
     def fmt_channel(channel) -> str:
