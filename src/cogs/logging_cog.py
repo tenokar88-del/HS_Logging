@@ -143,7 +143,7 @@ class LoggingCog(commands.Cog):
     @staticmethod
     def fmt_channel(channel) -> str:
         """채널 멘션 + 이름."""
-        return f"<#{channel.id}> (`{channel.name}`)"
+        return f"<#{channel.id}> (`{channel.name}-{channel.id}`)"
 
     # ── 메시지 작성 ───────────────────────────────────────────────
 
@@ -300,6 +300,24 @@ class LoggingCog(commands.Cog):
             f"➖ **채널 삭제** `{time_str()}`\n"
             f"**채널:** {self.fmt_channel(channel)}\n"
             f"**유형:** {str(channel.type)}"
+        )
+
+    # ── 채널 이름 변경 ────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_guild_channel_update(
+        self,
+        before: discord.abc.GuildChannel,
+        after: discord.abc.GuildChannel,
+    ):
+        if not self.is_source_guild(after.guild.id):
+            return
+        if before.name == after.name:   
+            return
+        await self.log(
+            f"✏️ **채널 이름 변경** `{time_str()}`\n"
+            f"**이전 이름:** `{before.name}`\n"
+            f"**변경 후:** {self.fmt_channel(after)}"
         )
 
     # ── 음성채널 입퇴장 ───────────────────────────────────────────
