@@ -4,6 +4,7 @@ logging_cog.py
 """
 
 from __future__ import annotations
+import io
 import os
 import discord
 from discord.ext import commands
@@ -11,6 +12,21 @@ from datetime import datetime, timezone, timedelta
 
 # 한국 시간 기준
 KST = timezone(timedelta(hours=9))
+
+# 첨부파일 재업로드 관련 설정
+# - 디스코드 무료(비-Nitro) 계정 업로드 한도는 2026년 기준 10MB.
+#   (2024년 말 25MB에서 10MB로 축소된 뒤 계속 유지 중. 서버가 부스트되어 있거나
+#   봇 계정이 Nitro라면 LOG_MAX_ATTACHMENT_BYTES 환경변수로 늘려도 됨: Nitro Basic 50MB, Nitro 500MB,
+#   서버 부스트 레벨2 50MB, 레벨3 100MB)
+# - 디스코드는 10진법 기준(1MB = 1,000,000바이트)으로 한도를 체크하므로,
+#   1024*1024로 계산하면 실제 한도보다 커져서 업로드가 거부될 수 있음. 10진 MB로 계산.
+MAX_ATTACHMENT_BYTES = int(os.getenv("LOG_MAX_ATTACHMENT_BYTES", 10_000_000))
+# 메시지 하나에 첨부파일이 여러 개 있을 때(최대 10개) 순간 메모리 사용량이
+# 과도해지지 않도록 다운로드 총량에도 상한을 둠.
+MAX_TOTAL_ATTACHMENT_BYTES = int(os.getenv("LOG_MAX_TOTAL_ATTACHMENT_BYTES", 40_000_000))
+
+# 디스코드 메시지 본문 길이 제한 (안전하게 여유를 조금 둠)
+DISCORD_MESSAGE_LIMIT = 1990
 
 
 def kst_now() -> datetime:
@@ -119,15 +135,30 @@ class LoggingCog(commands.Cog):
             print(f"[Logging] 포스트 생성 실패 (forum_id={forum_id}): {e}")
             return None
 
-    async def log(self, message: str):
-        """등록된 모든 포럼 포스트에 로그 메시지 전송."""
+    async def log(self, message: str, attachments: list[tuple[str, bytes]] | None = None):
+        """등록된 모든 포럼 포스트에 로그 메시지 전송. attachments가 있으면 파일도 함께 재업로드."""
+        if len(message) > DISCORD_MESSAGE_LIMIT:
+            message = message[: DISCORD_MESSAGE_LIMIT - 1] + "…"
         for forum_id in self.log_forum_ids:
             post = await self.get_or_create_post(forum_id)
-            if post:
+            if not post:
+                continue
+            try:
+                if attachments:
+                    # forum마다 새 File 객체를 만들어야 함 (discord.File은 재사용 불가)
+                    files = [discord.File(io.BytesIO(data), filename=name) for name, data in attachments]
+                    await post.send(message, files=files)
+                else:
+                    await post.send(message)
+            except discord.HTTPException as e:
+                # 파일 전송이 실패해도(용량 초과 등) 텍스트 로그는 남기기
+                print(f"[Logging] 첨부파일 전송 실패, 텍스트만 재시도 (forum_id={forum_id}): {e}")
                 try:
                     await post.send(message)
-                except Exception as e:
-                    print(f"[Logging] 로그 전송 실패 (forum_id={forum_id}): {e}")
+                except Exception as e2:
+                    print(f"[Logging] 로그 전송 실패 (forum_id={forum_id}): {e2}")
+            except Exception as e:
+                print(f"[Logging] 로그 전송 실패 (forum_id={forum_id}): {e}")
 
     @staticmethod
     def fmt_member(member: discord.Member | discord.User) -> str:
@@ -145,6 +176,27 @@ class LoggingCog(commands.Cog):
         """채널 멘션 + 이름."""
         return f"<#{channel.id}> (`{channel.name}-{channel.id}`)"
 
+    @staticmethod
+    async def _download_attachments(message: discord.Message) -> list[tuple[str, bytes]]:
+        """메시지의 첨부파일을 바이트로 다운로드. 개별/총합 용량 초과분은 건너뜀."""
+        result: list[tuple[str, bytes]] = []
+        total = 0
+        for att in message.attachments:
+            if att.size and att.size > MAX_ATTACHMENT_BYTES:
+                print(f"[Logging] 첨부파일 크기 초과, 건너뜀: {att.filename} ({att.size} bytes)")
+                continue
+            if total + (att.size or 0) > MAX_TOTAL_ATTACHMENT_BYTES:
+                print(f"[Logging] 첨부파일 총합 용량 초과, 나머지 건너뜀: {att.filename}")
+                break
+            try:
+                data = await att.read()
+            except Exception as e:
+                print(f"[Logging] 첨부파일 다운로드 실패: {att.filename} - {e}")
+                continue
+            result.append((att.filename, data))
+            total += len(data)
+        return result
+
     # ── 메시지 작성 ───────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -156,12 +208,21 @@ class LoggingCog(commands.Cog):
         if not self.is_source_guild(message.guild.id):
             return
         content = (message.content or "*(첨부파일 또는 내용 없음)*")[:1800]
+
+        attachments = await self._download_attachments(message) if message.attachments else []
+        attach_note = ""
+        if message.attachments:
+            attach_note = f"\n**첨부파일:** {len(message.attachments)}개"
+            if len(attachments) < len(message.attachments):
+                attach_note += f" (다시 업로드됨: {len(attachments)}개, 용량 초과/실패 {len(message.attachments) - len(attachments)}개)"
+
         await self.log(
             f"💬 **메시지 작성** `{today_str()} {time_str()}`\n"
             f"**채널:** {self.fmt_channel(message.channel)}\n"
             f"**작성자:** {self.fmt_member(message.author)}\n"
             f"**메시지 ID:** `{message.id}`\n"
-            f"**내용:** {content}"
+            f"**내용:** {content}{attach_note}",
+            attachments=attachments,
         )
 
     # ── 메시지 삭제 ───────────────────────────────────────────────
