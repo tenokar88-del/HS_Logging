@@ -74,7 +74,16 @@ def _load_source_guild_id() -> int | None:
     return int(val) if val else None
 
 
+def _load_optional_int(env_name: str) -> int | None:
+    """선택적 환경변수를 int로 읽음. 미설정 시 None."""
+    val = os.getenv(env_name)
+    return int(val) if val else None
+
+
 class LoggingCog(commands.Cog):
+    # 등업키워드 카테고리 이름 접두사 (예: "등업키워드:호랑이")
+    KEYWORD_PREFIX = "등업키워드:"
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.log_forum_ids: list[int] = _load_forum_ids()
@@ -83,6 +92,11 @@ class LoggingCog(commands.Cog):
         self._post_cache: dict[int, dict[str, int]] = {
             fid: {} for fid in self.log_forum_ids
         }
+
+        # 등업키워드 인증 기능 설정
+        self.kw_input_channel_id: int | None = _load_optional_int("KW_INPUT_CHANNEL_ID")
+        self.kw_category_id: int | None = _load_optional_int("KW_CATEGORY_ID")
+        self.role_player_id: int | None = _load_optional_int("ROLE_PLAYER_ID")
 
     def is_source_guild(self, guild_id: int) -> bool:
         """이벤트가 로깅 대상 서버(A 서버)에서 발생했는지 확인."""
@@ -197,6 +211,57 @@ class LoggingCog(commands.Cog):
             total += len(data)
         return result
 
+    # ── 등업키워드 인증 ──────────────────────────────────────────
+
+    async def _handle_levelup_keyword(self, message: discord.Message) -> bool:
+        """
+        KW_INPUT_CHANNEL_ID 채널에 작성된 메시지가
+        KW_CATEGORY_ID 카테고리 이름의 '등업키워드:XXXXX' 중 XXXXX와
+        완전히 일치하면(엄격 비교) ROLE_PLAYER_ID 역할을 부여.
+
+        반환값: 인증(역할 부여)에 성공했으면 True, 아니면 False.
+        """
+        if not self.kw_category_id or not self.role_player_id:
+            return False
+
+        category = self.bot.get_channel(self.kw_category_id)
+        if not category or not isinstance(category, discord.CategoryChannel):
+            print(f"[Logging] 등업키워드 카테고리를 찾을 수 없습니다. ID: {self.kw_category_id}")
+            return False
+
+        if not category.name.startswith(self.KEYWORD_PREFIX):
+            print(f"[Logging] 카테고리 이름이 '{self.KEYWORD_PREFIX}' 형식이 아닙니다: {category.name}")
+            return False
+
+        keyword = category.name[len(self.KEYWORD_PREFIX):]
+        # 엄격한 완전일치: 대소문자, 공백 모두 그대로 비교
+        if not keyword or message.content != keyword:
+            return False
+
+        role = message.guild.get_role(self.role_player_id)
+        if not role:
+            print(f"[Logging] 역할을 찾을 수 없습니다. ID: {self.role_player_id}")
+            return False
+
+        if role in message.author.roles:
+            return True  # 이미 보유 중 — 인증 성공으로 취급
+
+        try:
+            await message.author.add_roles(role, reason="등업키워드 인증 성공")
+        except discord.Forbidden:
+            print(f"[Logging] 역할 부여 권한 없음 (author={message.author.id})")
+            return False
+        except Exception as e:
+            print(f"[Logging] 역할 부여 실패: {e}")
+            return False
+
+        await self.log(
+            f"🔑 **등업키워드 인증 성공** `{today_str()} {time_str()}`\n"
+            f"**멤버:** {self.fmt_member(message.author)}\n"
+            f"**부여된 역할:** {self.fmt_role(role)}"
+        )
+        return True
+
     # ── 메시지 작성 ───────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -207,6 +272,20 @@ class LoggingCog(commands.Cog):
             return
         if not self.is_source_guild(message.guild.id):
             return
+
+        # 등업키워드 입력 채널 처리: 인증 시도 후, 관리자가 아니면 메시지 자동 삭제
+        if self.kw_input_channel_id and message.channel.id == self.kw_input_channel_id:
+            await self._handle_levelup_keyword(message)
+            if not message.author.guild_permissions.administrator:
+                try:
+                    await message.delete()
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    print(f"[Logging] 등업키워드 메시지 삭제 권한 없음 (message_id={message.id})")
+                except Exception as e:
+                    print(f"[Logging] 등업키워드 메시지 삭제 실패: {e}")
+
         content = (message.content or "*(첨부파일 또는 내용 없음)*")[:1800]
 
         attachments = await self._download_attachments(message) if message.attachments else []
