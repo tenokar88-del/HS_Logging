@@ -82,7 +82,7 @@ def _load_optional_int(env_name: str) -> int | None:
 
 class LoggingCog(commands.Cog):
     # 등업키워드 카테고리 이름 접두사 (예: "등업키워드:호랑이")
-    KEYWORD_PREFIX = "등업키워드:"
+    KEYWORD_PREFIX = "등업키워드설정:"
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -216,7 +216,7 @@ class LoggingCog(commands.Cog):
     async def _handle_levelup_keyword(self, message: discord.Message) -> bool:
         """
         KW_INPUT_CHANNEL_ID 채널에 작성된 메시지가
-        KW_CATEGORY_ID 카테고리 이름의 '등업키워드:XXXXX' 중 XXXXX와
+        KW_CATEGORY_ID 카테고리 이름의 '등업키워드설정:XXXXX' 중 XXXXX와
         완전히 일치하면(엄격 비교) ROLE_PLAYER_ID 역할을 부여.
 
         반환값: 인증(역할 부여)에 성공했으면 True, 아니면 False.
@@ -266,17 +266,19 @@ class LoggingCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
-            return
         if not message.guild:
             return
         if not self.is_source_guild(message.guild.id):
             return
 
-        # 등업키워드 입력 채널 처리: 인증 시도 후, 관리자가 아니면 메시지 자동 삭제
+        # 등업키워드 입력 채널 처리: 인증 시도 후,
+        # 봇이 작성했거나(관리자 봇 포함) 관리자가 아니면 메시지 자동 삭제
         if self.kw_input_channel_id and message.channel.id == self.kw_input_channel_id:
-            await self._handle_levelup_keyword(message)
-            if not message.author.guild_permissions.administrator:
+            if not message.author.bot:
+                await self._handle_levelup_keyword(message)
+
+            is_admin = message.author.guild_permissions.administrator
+            if message.author.bot or not is_admin:
                 try:
                     await message.delete()
                 except discord.NotFound:
@@ -285,6 +287,10 @@ class LoggingCog(commands.Cog):
                     print(f"[Logging] 등업키워드 메시지 삭제 권한 없음 (message_id={message.id})")
                 except Exception as e:
                     print(f"[Logging] 등업키워드 메시지 삭제 실패: {e}")
+
+        # 아래 일반 메시지 로깅은 봇 메시지 제외
+        if message.author.bot:
+            return
 
         content = (message.content or "*(첨부파일 또는 내용 없음)*")[:1800]
 
