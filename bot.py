@@ -19,11 +19,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 async def load_cogs():
-    # await bot.load_extension("src.cogs.room_commands")
-    # await bot.load_extension("src.cogs.voice_listener")
-    # await bot.load_extension("src.cogs.chat_listener")
-    # await bot.load_extension("src.cogs.recruit_listener")
     await bot.load_extension("src.cogs.logging_cog")
+    await bot.load_extension("src.cogs.monthly_notice_cog")
 
 @bot.event
 async def on_ready():
