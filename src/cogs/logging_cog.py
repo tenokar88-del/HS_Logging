@@ -28,6 +28,12 @@ MAX_TOTAL_ATTACHMENT_BYTES = int(os.getenv("LOG_MAX_TOTAL_ATTACHMENT_BYTES", 40_
 # 디스코드 메시지 본문 길이 제한 (안전하게 여유를 조금 둠)
 DISCORD_MESSAGE_LIMIT = 1990
 
+# 로그 메시지 전송 시 멘션 알림(핑)을 전부 끔.
+# 원본 메시지 내용에 <@유저ID>, <@&역할ID>, @everyone/@here 등이 그대로 들어있어도
+# 이 옵션 덕분에 로그 채널에서 재전송될 때 실제 알림은 발생하지 않음.
+# (멘션 텍스트 자체는 디스코드 클라이언트에서 계속 "@이름" 형태로 보임 — 정보는 유지됨)
+NO_PING = discord.AllowedMentions.none()
+
 
 def kst_now() -> datetime:
     return datetime.now(KST)
@@ -161,14 +167,14 @@ class LoggingCog(commands.Cog):
                 if attachments:
                     # forum마다 새 File 객체를 만들어야 함 (discord.File은 재사용 불가)
                     files = [discord.File(io.BytesIO(data), filename=name) for name, data in attachments]
-                    await post.send(message, files=files)
+                    await post.send(message, files=files, allowed_mentions=NO_PING)
                 else:
-                    await post.send(message)
+                    await post.send(message, allowed_mentions=NO_PING)
             except discord.HTTPException as e:
                 # 파일 전송이 실패해도(용량 초과 등) 텍스트 로그는 남기기
                 print(f"[Logging] 첨부파일 전송 실패, 텍스트만 재시도 (forum_id={forum_id}): {e}")
                 try:
-                    await post.send(message)
+                    await post.send(message, allowed_mentions=NO_PING)
                 except Exception as e2:
                     print(f"[Logging] 로그 전송 실패 (forum_id={forum_id}): {e2}")
             except Exception as e:
