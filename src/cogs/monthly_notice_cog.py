@@ -19,7 +19,7 @@ NOTICE_HOUR = int(os.getenv("MONTHLY_NOTICE_HOUR", 9))
 NOTICE_MINUTE = int(os.getenv("MONTHLY_NOTICE_MINUTE", 0))
 NOTICE_TIME = dtime(hour=NOTICE_HOUR, minute=NOTICE_MINUTE, tzinfo=KST)
 
-NOTICE_MESSAGE = "#월 1일이 되었습니다. 경고 차감 대상 유저를 확인해 주세요."
+NOTICE_MESSAGE = "새 달의 1일이 되었습니다. 경고 차감 대상 유저를 확인해 주세요."
 
 
 def _load_admin_channel_id() -> int | None:

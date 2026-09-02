@@ -21,6 +21,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def load_cogs():
     await bot.load_extension("src.cogs.logging_cog")
     await bot.load_extension("src.cogs.monthly_notice_cog")
+    await bot.load_extension("src.cogs.anonymous_chat_cog")
 
 @bot.event
 async def on_ready():
