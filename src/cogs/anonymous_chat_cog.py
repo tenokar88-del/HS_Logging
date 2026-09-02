@@ -14,8 +14,10 @@
 채널 맨 위) 길이 제한(1900자)을 넘으면 버튼 메시지 자체를 채팅으로 바꾸고
 새 버튼 메시지를 다시 생성한다.
 
-또한 이 채널에 (관리자 등) 사람이 직접 메시지를 올리면, 기존 버튼 메시지를
-지우고 새 버튼 메시지를 맨 아래에 다시 생성해 항상 버튼이 맨 아래 있도록 한다.
+또한 이 채널에는 봇이 관리하는 메시지(버튼 메시지 / 채팅 취합 메시지)만 남아있어야
+하므로, (관리자 등) 사람이 직접 메시지를 올리면 즉시 자동으로 삭제한다. 삭제 권한이
+없는 예외 상황에서는 대신 기존 버튼 메시지를 지우고 새 버튼 메시지를 맨 아래에
+다시 생성해 최소한 버튼은 항상 맨 아래에 있도록 한다.
 """
 
 import asyncio
@@ -30,7 +32,7 @@ from src import db
 log = logging.getLogger(__name__)
 
 # 환경변수로 덮어쓸 수 있도록 하되, 기본값은 요청하신 채널 ID로 둡니다.
-ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID", "1544603117507846185"))
+ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID"))
 
 CHAT_INPUT_CUSTOM_ID = "anon_channel:chat_input"
 NICKNAME_CHANGE_CUSTOM_ID = "anon_channel:nickname_change"
@@ -253,9 +255,22 @@ class AnonymousChatCog(commands.Cog):
         if message.author.id == self.bot.user.id:
             return  # 봇 자신이 보낸 메시지(버튼/취합 메시지)는 무시
 
-        # 버튼 메시지 이후에 사람(관리자 등)이 메시지를 올린 경우:
-        # 기존 버튼 메시지를 지우고, 새 버튼 메시지를 맨 아래에 다시 생성한다.
         async with _anon_lock:
+            try:
+                await message.delete()
+                # 삭제에 성공하면 버튼 메시지가 자동으로 다시 맨 아래가 되므로 더 할 일 없음.
+                return
+            except discord.NotFound:
+                return  # 이미 삭제된 메시지
+            except discord.Forbidden:
+                log.warning(
+                    "익명채널 메시지 삭제 권한이 없습니다 (message_id=%s). "
+                    "버튼 메시지를 재생성해 맨 아래로 유지합니다.",
+                    message.id,
+                )
+
+            # 삭제 권한이 없는 예외적인 경우: 기존처럼 버튼 메시지를 지우고 다시 생성해
+            # 최소한 버튼은 항상 채널 맨 아래에 있도록 한다.
             prev = None
             async for msg in message.channel.history(limit=1, before=message):
                 prev = msg

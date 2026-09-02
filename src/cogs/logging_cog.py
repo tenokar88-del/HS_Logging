@@ -30,7 +30,7 @@ DISCORD_MESSAGE_LIMIT = 1990
 
 # 익명채팅 채널 ID. 이 채널의 메시지 생성/수정/삭제는 로그로 남기지 않는다.
 # (anonymous_chat_cog.py와 동일한 환경변수/기본값을 사용해 두 cog가 항상 같은 채널을 가리키게 한다.)
-ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID", "1544603117507846185"))
+ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID"))
 
 # 로그 메시지 전송 시 멘션 알림(핑)을 전부 끔.
 # 원본 메시지 내용에 <@유저ID>, <@&역할ID>, @everyone/@here 등이 그대로 들어있어도
