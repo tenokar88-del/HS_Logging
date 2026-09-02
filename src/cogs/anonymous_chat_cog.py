@@ -100,16 +100,14 @@ class ChatInputModal(discord.ui.Modal, title="채팅 입력"):
     async def on_submit(self, interaction: discord.Interaction):
         cleaned_content = self.content.value.replace("`", "")
         nickname = await get_nickname(interaction.user.id)
-        formatted = f"## {nickname}\n```{cleaned_content}```"
+        formatted = f"**💬{nickname}**\n```{cleaned_content}```"
 
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        # 아무 메시지도 띄우지 않고 모달만 조용히 닫는다.
+        await interaction.response.defer()
         try:
             await post_or_append(interaction.client, self.button_message, formatted)
         except discord.HTTPException:
             log.exception("익명채팅 메시지 처리 중 오류")
-            await interaction.followup.send("메시지 전송 중 오류가 발생했습니다.", ephemeral=True)
-            return
-        await interaction.followup.send("전송되었습니다.", ephemeral=True)
 
 
 class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
@@ -138,7 +136,8 @@ class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
                 "INSERT INTO IDNICKMAP (UserID, Nickname) VALUES (%s, %s)",
                 (user_id, new_nickname),
             )
-            await interaction.response.send_message("닉네임이 등록되었습니다.", ephemeral=True)
+            # 아무 메시지도 띄우지 않고 모달만 조용히 닫는다.
+            await interaction.response.defer()
             return
 
         # 이미 등록된 유저: UPDATE 하고 채팅에 변경 내역을 남긴다.
@@ -149,16 +148,12 @@ class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
         )
         formatted = f"**닉네임 변경** : `{old_nickname}` --> `{new_nickname}`"
 
-        await interaction.response.defer(ephemeral=True, thinking=False)
+        # 아무 메시지도 띄우지 않고 모달만 조용히 닫는다.
+        await interaction.response.defer()
         try:
             await post_or_append(interaction.client, self.button_message, formatted)
         except discord.HTTPException:
             log.exception("닉네임 변경 메시지 처리 중 오류")
-            await interaction.followup.send(
-                "닉네임은 변경되었지만 채널 표시 중 오류가 발생했습니다.", ephemeral=True
-            )
-            return
-        await interaction.followup.send("닉네임이 변경되었습니다.", ephemeral=True)
 
 
 async def get_nickname(user_id: int) -> str:
