@@ -28,6 +28,10 @@ MAX_TOTAL_ATTACHMENT_BYTES = int(os.getenv("LOG_MAX_TOTAL_ATTACHMENT_BYTES", 40_
 # 디스코드 메시지 본문 길이 제한 (안전하게 여유를 조금 둠)
 DISCORD_MESSAGE_LIMIT = 1990
 
+# 익명채팅 채널 ID. 이 채널의 메시지 생성/수정/삭제는 로그로 남기지 않는다.
+# (anonymous_chat_cog.py와 동일한 환경변수/기본값을 사용해 두 cog가 항상 같은 채널을 가리키게 한다.)
+ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID", "1544603117507846185"))
+
 # 로그 메시지 전송 시 멘션 알림(핑)을 전부 끔.
 # 원본 메시지 내용에 <@유저ID>, <@&역할ID>, @everyone/@here 등이 그대로 들어있어도
 # 이 옵션 덕분에 로그 채널에서 재전송될 때 실제 알림은 발생하지 않음.
@@ -276,6 +280,8 @@ class LoggingCog(commands.Cog):
             return
         if not self.is_source_guild(message.guild.id):
             return
+        if message.channel.id == ANONYMOUS_CHANNEL_ID:
+            return
 
         # 등업키워드 입력 채널 처리: 인증 시도 후,
         # 봇이 작성했거나(관리자 봇 포함) 관리자가 아니면 메시지 자동 삭제
@@ -322,6 +328,8 @@ class LoggingCog(commands.Cog):
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         if not payload.guild_id or not self.is_source_guild(payload.guild_id):
             return
+        if payload.channel_id == ANONYMOUS_CHANNEL_ID:
+            return
         channel = self.bot.get_channel(payload.channel_id)
         channel_str = self.fmt_channel(channel) if channel else f"`{payload.channel_id}`"
 
@@ -352,6 +360,8 @@ class LoggingCog(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
         if not payload.guild_id or not self.is_source_guild(payload.guild_id):
+            return
+        if payload.channel_id == ANONYMOUS_CHANNEL_ID:
             return
         channel = self.bot.get_channel(payload.channel_id)
         channel_str = self.fmt_channel(channel) if channel else f"`{payload.channel_id}`"
