@@ -74,6 +74,9 @@ class ButtonMessageView(discord.ui.View):
         custom_id=CHAT_INPUT_CUSTOM_ID,
     )
     async def chat_input(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await has_nickname(interaction.user.id):
+            await interaction.response.send_message("닉네임 변경부터 해주세요.", ephemeral=True)
+            return
         await interaction.response.send_modal(ChatInputModal(button_message=interaction.message))
 
     @discord.ui.button(
@@ -126,6 +129,16 @@ class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
         new_nickname = strip_markdown(self.nickname.value) or "ㅇㅇ"
         user_id = interaction.user.id
 
+        duplicate = await db.fetchone(
+            "SELECT UserID FROM IDNICKMAP WHERE Nickname = %s AND UserID != %s LIMIT 1",
+            (new_nickname, user_id),
+        )
+        if duplicate is not None:
+            await interaction.response.send_message(
+                "중복되는 닉네임은 사용할 수 없습니다.", ephemeral=True
+            )
+            return
+
         row = await db.fetchone(
             "SELECT Nickname FROM IDNICKMAP WHERE UserID = %s", (user_id,)
         )
@@ -154,6 +167,14 @@ class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
             await post_or_append(interaction.client, self.button_message, formatted)
         except discord.HTTPException:
             log.exception("닉네임 변경 메시지 처리 중 오류")
+
+
+async def has_nickname(user_id: int) -> bool:
+    """IDNICKMAP에 유효한(NULL이 아닌) 닉네임이 등록되어 있는지 확인."""
+    row = await db.fetchone(
+        "SELECT Nickname FROM IDNICKMAP WHERE UserID = %s", (user_id,)
+    )
+    return row is not None and row["Nickname"] is not None
 
 
 async def get_nickname(user_id: int) -> str:
