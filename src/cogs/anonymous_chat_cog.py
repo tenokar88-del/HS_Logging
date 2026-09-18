@@ -168,7 +168,7 @@ class NicknameChangeModal(discord.ui.Modal, title="닉네임 변경"):
             return
 
         # 이미 등록된 유저: UPDATE 하고 채팅에 변경 내역을 남긴다.
-        old_nickname = row["Nickname"] or "ㅇㅇ"
+        old_nickname = row["nickname"] or "ㅇㅇ"
         await db.execute(
             "UPDATE IDNICKMAP SET Nickname = %s WHERE UserID = %s",
             (new_nickname, user_id),
@@ -188,7 +188,7 @@ async def has_nickname(user_id: int) -> bool:
     row = await db.fetchone(
         "SELECT Nickname FROM IDNICKMAP WHERE UserID = %s", (user_id,)
     )
-    return row is not None and row["Nickname"] is not None
+    return row is not None and row["nickname"] is not None
 
 
 async def get_nickname(user_id: int) -> str:
@@ -196,9 +196,9 @@ async def get_nickname(user_id: int) -> str:
     row = await db.fetchone(
         "SELECT Nickname FROM IDNICKMAP WHERE UserID = %s", (user_id,)
     )
-    if row is None or row["Nickname"] is None:
+    if row is None or row["nickname"] is None:
         return "ㅇㅇ"
-    return row["Nickname"]
+    return row["nickname"]
 
 
 async def post_or_append(
