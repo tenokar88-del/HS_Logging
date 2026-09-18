@@ -69,6 +69,13 @@ class ButtonMessageView(discord.ui.View):
 
     def __init__(self):
         super().__init__(timeout=None)
+        # 주의: 이 View는 상태가 없으므로(고정 custom_id) 아래 _SHARED_BUTTON_VIEW
+        # 하나만 만들어 재사용한다. 버튼 메시지가 재생성될 때마다(채널 정리,
+        # 길이 초과 분리 등) 매번 ButtonMessageView()를 새로 만들면, timeout=None
+        # 인스턴스가 discord.py 내부 캐시에서 지워지지 않아 재생성 횟수만큼
+        # 메모리에 계속 쌓인다(누수). 실제 인스턴스 생성은 파일 하단
+        # _SHARED_BUTTON_VIEW = ButtonMessageView() 한 줄뿐이고, 이 파일 안의
+        # 모든 사용처는 그 하나를 가리켜 쓴다.
 
     @discord.ui.button(
         label="채팅 입력",
@@ -88,6 +95,11 @@ class ButtonMessageView(discord.ui.View):
     )
     async def nickname_change(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NicknameChangeModal(button_message=interaction.message))
+
+
+# 이 파일 안에서 버튼 메시지를 (재)생성할 때는 항상 이 인스턴스 하나만 쓴다.
+# (자세한 이유는 위 ButtonMessageView.__init__ 주석 참고.)
+_SHARED_BUTTON_VIEW = ButtonMessageView()
 
 
 class ChatInputModal(discord.ui.Modal, title="채팅 입력"):
@@ -218,7 +230,7 @@ async def post_or_append(
         # 타겟 메시지가 없거나(버튼 메시지 바로 위가 사람이 쓴 메시지 / 채널 맨 위)
         # 혹은 길이 초과 -> 버튼 메시지를 채팅 내용으로 전환하고 새 버튼 메시지 생성
         await button_message.edit(content=formatted_text, view=None)
-        await channel.send(content=None, view=ButtonMessageView())
+        await channel.send(content=None, view=_SHARED_BUTTON_VIEW)
 
 
 class AnonymousChatCog(commands.Cog):
@@ -228,7 +240,7 @@ class AnonymousChatCog(commands.Cog):
     async def cog_load(self):
         await db.init_pool()
         # persistent view는 custom_id 기준으로 동작하므로 메시지에 종속되지 않게 등록한다.
-        self.bot.add_view(ButtonMessageView())
+        self.bot.add_view(_SHARED_BUTTON_VIEW)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -246,7 +258,7 @@ class AnonymousChatCog(commands.Cog):
                 last_message = msg
 
             if last_message is None or not is_button_message(last_message, self.bot.user.id):
-                await channel.send(content=None, view=ButtonMessageView())
+                await channel.send(content=None, view=_SHARED_BUTTON_VIEW)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -281,7 +293,7 @@ class AnonymousChatCog(commands.Cog):
                 except discord.NotFound:
                     pass
 
-            await message.channel.send(content=None, view=ButtonMessageView())
+            await message.channel.send(content=None, view=_SHARED_BUTTON_VIEW)
 
 
 async def setup(bot: commands.Bot):
