@@ -38,6 +38,12 @@ ANONYMOUS_CHANNEL_ID = int(os.getenv("ANONYMOUS_CHANNEL_ID"))
 # (멘션 텍스트 자체는 디스코드 클라이언트에서 계속 "@이름" 형태로 보임 — 정보는 유지됨)
 NO_PING = discord.AllowedMentions.none()
 
+# 음성채널 입장/퇴장/이동 로그에 붙는 '현재 멤버 목록' 설정
+# - 멤버 목록이 이 글자 수를 넘으면 "… 외 N명"으로 줄임 (전체 로그 한도 1990자 안에 들어오도록)
+VOICE_LIST_MAX_CHARS = 700
+# - 목록에 봇(음악봇 등)도 포함할지 여부. False로 바꾸면 사람만 표시.
+VOICE_LIST_INCLUDE_BOTS = True
+
 
 def kst_now() -> datetime:
     return datetime.now(KST)
@@ -199,6 +205,36 @@ class LoggingCog(commands.Cog):
     def fmt_channel(channel) -> str:
         """채널 멘션 + 이름."""
         return f"<#{channel.id}> (`{channel.name}-{channel.id}`)"
+
+    @staticmethod
+    def fmt_voice_members(channel, max_chars: int = VOICE_LIST_MAX_CHARS) -> str:
+        """
+        음성채널에 현재 있는 멤버를 @멘션 목록으로 반환.
+        - 알림은 log()의 allowed_mentions=NO_PING 덕분에 가지 않음.
+        - 멘션이 너무 많아 글자 수 제한에 걸리면, 멘션이 중간에 잘려 깨지지 않도록
+          멤버 단위로 자르고 '… 외 N명'을 붙임.
+        """
+        if channel is None:
+            return "없음"
+        members = [m for m in channel.members if VOICE_LIST_INCLUDE_BOTS or not m.bot]
+        if not members:
+            return "없음"
+
+        total = len(members)
+        mentions: list[str] = []
+        length = 0
+        for m in members:
+            piece = m.mention
+            extra = len(piece) + (1 if mentions else 0)  # 공백 구분자
+            if length + extra > max_chars:
+                break
+            mentions.append(piece)
+            length += extra
+
+        text = " ".join(mentions)
+        if len(mentions) < total:
+            text += f" … 외 {total - len(mentions)}명"
+        return f"{text} (총 {total}명)"
 
     @staticmethod
     async def _download_attachments(message: discord.Message) -> list[tuple[str, bytes]]:
@@ -496,23 +532,30 @@ class LoggingCog(commands.Cog):
         if not self.is_source_guild(member.guild.id):
             return
 
+        # 이벤트 시점에는 디스코드 캐시가 이미 갱신된 상태라서
+        #  - after.channel.members  → 방금 들어온 본인 포함
+        #  - before.channel.members → 방금 나간 본인 제외
         if before.channel is None and after.channel is not None:
             await self.log(
                 f"🔊 **음성채널 입장** `{time_str()}`\n"
                 f"**멤버:** {self.fmt_member(member)}\n"
-                f"**채널:** {self.fmt_channel(after.channel)}"
+                f"**채널:** {self.fmt_channel(after.channel)}\n"
+                f"**입장 후 채널 멤버:** {self.fmt_voice_members(after.channel)}"
             )
         elif before.channel is not None and after.channel is None:
             await self.log(
                 f"🔇 **음성채널 퇴장** `{time_str()}`\n"
                 f"**멤버:** {self.fmt_member(member)}\n"
-                f"**채널:** {self.fmt_channel(before.channel)}"
+                f"**채널:** {self.fmt_channel(before.channel)}\n"
+                f"**퇴장 후 남은 멤버:** {self.fmt_voice_members(before.channel)}"
             )
         elif before.channel != after.channel:
             await self.log(
                 f"🔀 **음성채널 이동** `{time_str()}`\n"
                 f"**멤버:** {self.fmt_member(member)}\n"
-                f"**이전:** {self.fmt_channel(before.channel)} → **이후:** {self.fmt_channel(after.channel)}"
+                f"**이전:** {self.fmt_channel(before.channel)} → **이후:** {self.fmt_channel(after.channel)}\n"
+                f"**이전 채널에 남은 멤버:** {self.fmt_voice_members(before.channel)}\n"
+                f"**이동한 채널 멤버:** {self.fmt_voice_members(after.channel)}"
             )
 
 
