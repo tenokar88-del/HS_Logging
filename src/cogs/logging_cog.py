@@ -423,8 +423,15 @@ class LoggingCog(commands.Cog):
                 f"**메시지 작성 시간:** `{created_kst}`"
             )
         else:
+            # 내용이 바뀐 수정만 로깅 (임베드 갱신 등 내용 변경이 없는 수정 이벤트는 무시)
+            if "content" not in payload.data:
+                return
+            # 캐시에 없어도 수정 이벤트에는 작성자 정보가 들어 있으므로,
+            # 봇이 쓴 메시지(카운트다운 갱신 등)의 수정은 로깅하지 않음.
+            author = payload.data.get("author") or {}
+            if author.get("bot") or str(author.get("id")) == str(self.bot.user.id):
+                return
             new_content = payload.data.get("content", "*(알 수 없음)*")[:800]
-            # 봇 메시지 여부는 캐시 없으면 확인 불가 — author.bot 체크 생략
             await self.log(
                 f"✏️ **메시지 수정** `{today_str()} {time_str()}`\n"
                 f"**채널:** {channel_str}\n"
