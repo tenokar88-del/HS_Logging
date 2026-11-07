@@ -2,9 +2,7 @@
 countdown_cog.py
 /타이머 {초} — 채널에 이모지 카운트다운 메시지를 만들고 5초마다 갱신
 
-- 메시지 2개를 사용:
-    1) message_id    : 이모지 시계 (예: 2️⃣0️⃣<:hs_colon:...>0️⃣0️⃣)
-    2) submessage_id : "<t:갱신시각:R> 업데이트됨"
+- 채널에 이모지 시계 메시지 1개만 사용 (예: 2️⃣0️⃣<:hs_colon:...>0️⃣0️⃣). 이 메시지의 id 가 message_id.
 - 카운트다운 정보는 DB(countdowntimer)와 봇 메모리(self.timers)에 같이 보관.
   갱신할 때는 DB를 조회하지 않고 메모리만 사용한다.
 - 전역 변수 countdown_switch: 0이면 갱신 루프가 아무것도 하지 않고, 1이면 동작.
@@ -25,13 +23,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # db.py 위치에 맞게 고칠 것: anonymous_chat_cog.py 맨 위의 db import 줄과 똑같이 맞추면 됨
-from src import db
+from src.utils import db
 
 # ── 설정 ──────────────────────────────────────────────────────────
 UPDATE_INTERVAL = 5                  # 한 채널의 기본(최소) 갱신 주기(초)
 # 채널당 수정 한도를 "1초에 1건" 정도로 보수적으로 가정 (디스코드는 5초에 5건 안팎으로 알려져 있음).
-# 타이머 1개 = 수정 2건(시계 + 업데이트됨)이므로, 한 채널의 갱신 주기는
-#   max(UPDATE_INTERVAL, 타이머 수 × 2 × EDIT_GAP) 초 → 타이머 3개면 6초, 5개면 10초.
+# 타이머 1개 = 수정 1건이므로, 한 채널의 갱신 주기는
+#   max(UPDATE_INTERVAL, 타이머 수 × EDIT_GAP) 초 → 타이머 5개까지는 5초, 8개면 8초.
 EDIT_GAP = 1.0
 SCHEDULER_TICK = 1                   # 어느 채널을 갱신할 차례인지 확인하는 주기(초). 메모리만 보므로 부담 없음.
 MAX_SECONDS = 7 * 86400              # /타이머 에 넣을 수 있는 최대 초 (7일)
@@ -41,13 +39,13 @@ END_MESSAGE = "{mention} 타이머가 종료되었습니다! ⏰"   # 종료 시
 
 # 테이블/컬럼 이름이 다르면 여기만 고치면 됨
 SQL_SELECT_ALL = (
-    "SELECT message_id, submessage_id, channel_id, creator_id, end_timestamp "
+    "SELECT message_id, channel_id, creator_id, end_timestamp "
     "FROM countdowntimer"
 )
 SQL_INSERT = (
     "INSERT INTO countdowntimer "
-    "(message_id, submessage_id, channel_id, creator_id, end_timestamp) "
-    "VALUES (%s, %s, %s, %s, %s)"
+    "(message_id, channel_id, creator_id, end_timestamp) "
+    "VALUES (%s, %s, %s, %s)"
 )
 SQL_DELETE = "DELETE FROM countdowntimer WHERE message_id = %s"
 
@@ -78,7 +76,6 @@ def format_clock(remaining: int) -> str:
 @dataclass
 class Timer:
     message_id: int
-    submessage_id: int
     channel_id: int
     creator_id: int
     end_timestamp: int   # 유닉스 초
@@ -110,7 +107,6 @@ class CountdownCog(commands.Cog):
         for r in rows:
             self.timers[r["message_id"]] = Timer(
                 message_id=r["message_id"],
-                submessage_id=r["submessage_id"],
                 channel_id=r["channel_id"],
                 creator_id=r["creator_id"],
                 end_timestamp=r["end_timestamp"],
@@ -169,7 +165,7 @@ class CountdownCog(commands.Cog):
             if channel_id in self._running:      # 이전 갱신이 아직 진행 중
                 continue
 
-            interval = max(UPDATE_INTERVAL, len(channel_timers) * 2 * EDIT_GAP)
+            interval = max(UPDATE_INTERVAL, len(channel_timers) * EDIT_GAP)
             if mono - self._last_run.get(channel_id, float("-inf")) >= interval:
                 # 이 채널의 정규 갱신 차례: 채널의 모든 타이머 갱신
                 self._last_run[channel_id] = mono
@@ -207,18 +203,13 @@ class CountdownCog(commands.Cog):
         now = time.time()
         remaining = math.ceil(timer.end_timestamp - now)
         main = self._partial(timer.channel_id, timer.message_id)
-        sub = self._partial(timer.channel_id, timer.submessage_id)
 
-        # 만료: 0:00 표시 → 두 번째 메시지 삭제 → 메모리/DB 삭제
+        # 만료: 0:00 표시 → 만든 사람 멘션 → 메모리/DB 삭제
         if remaining <= 0:
             try:
                 await main.edit(content=format_clock(0))
             except discord.HTTPException as e:
                 print(f"[Countdown] 종료 표시 실패 (message_id={timer.message_id}): {e}")
-            try:
-                await sub.delete()
-            except discord.HTTPException:
-                pass   # 이미 삭제된 경우 등은 무시
 
             # 타이머를 만든 사람 멘션 (그 사람만 알림, 다른 멘션은 전부 차단)
             try:
@@ -238,10 +229,13 @@ class CountdownCog(commands.Cog):
             await self._remove(timer)
             return
 
-        # 진행 중: 시계 갱신 + "N초 전 업데이트됨" 갱신
+        # 진행 중: 시계 갱신
         try:
+            t0 = time.time()
             await main.edit(content=format_clock(remaining))
-            await sub.edit(content=f"<t:{int(now)}:R> 업데이트됨")
+            elapsed = time.time() - t0
+            if elapsed > 2:   # 진단용: 수정이 느려진 경우만 로그
+                print(f"[Countdown] 느린 수정 감지 (message_id={timer.message_id}): {elapsed:.1f}초")
         except (discord.NotFound, discord.Forbidden) as e:
             # 메시지가 삭제됐거나 접근 불가 → 정보 삭제
             print(f"[Countdown] 메시지를 찾을 수 없어 제거 (message_id={timer.message_id}): {e}")
@@ -299,37 +293,34 @@ class CountdownCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         end_ts = int(time.time()) + seconds
-        main = sub = None
+        main = None
         try:
             main = await channel.send(format_clock(seconds))
-            sub = await channel.send(f"<t:{int(time.time())}:R> 업데이트됨")
             await db.execute(
-                SQL_INSERT, (main.id, sub.id, channel.id, interaction.user.id, end_ts)
+                SQL_INSERT, (main.id, channel.id, interaction.user.id, end_ts)
             )
         except Exception as e:
-            print(f"[Countdown] 타이머 생성 실패: {e}")
+            print(f"[Countdown] 타이머 생성 실패: {e!r}")
             # 만들다 만 메시지 정리
-            for m in (main, sub):
-                if m is not None:
-                    try:
-                        await m.delete()
-                    except Exception:
-                        pass
+            if main is not None:
+                try:
+                    await main.delete()
+                except Exception:
+                    pass
             await interaction.followup.send(
-                "타이머를 만들지 못했어요. 봇의 채널 권한을 확인해 주세요.", ephemeral=True
+                "타이머를 만들지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True
             )
             return
 
         self.timers[main.id] = Timer(
             message_id=main.id,
-            submessage_id=sub.id,
             channel_id=channel.id,
             creator_id=interaction.user.id,
             end_timestamp=end_ts,
         )
         countdown_switch = 1
 
-        # "생각 중…" 응답을 지워서 채널에는 카운트다운 메시지 2개만 남김
+        # "생각 중…" 응답을 지워서 채널에는 카운트다운 메시지만 남김
         try:
             await interaction.delete_original_response()
         except Exception:
