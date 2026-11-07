@@ -80,6 +80,15 @@ async def fetchone(sql: str, params: Sequence[Any] = ()) -> dict | None:
             return await cur.fetchone()
 
 
+async def fetchall(sql: str, params: Sequence[Any] = ()) -> list[dict]:
+    """SELECT 실행해서 모든 행을 dict 리스트로 반환. 없으면 빈 리스트."""
+    pool = await _get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(sql, params)
+            return await cur.fetchall()
+
+
 async def execute(sql: str, params: Sequence[Any] = ()) -> None:
     """INSERT/UPDATE/DELETE 등 결과를 안 돌려받는 쿼리 실행 (자동 커밋)."""
     pool = await _get_pool()

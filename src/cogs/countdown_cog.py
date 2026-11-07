@@ -9,7 +9,8 @@ countdown_cog.py
   갱신할 때는 DB를 조회하지 않고 메모리만 사용한다.
 - 전역 변수 countdown_switch: 0이면 갱신 루프가 아무것도 하지 않고, 1이면 동작.
 
-전제: bot.pool 에 asyncpg.Pool 이 이 cog 로드 전에 만들어져 있어야 함.
+DB 접근은 db.py(psycopg3 풀 헬퍼)의 fetchall / execute 를 사용한다.
+(db.py 에 fetchall 이 추가된 버전이 필요함)
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from dataclasses import dataclass
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+
+# db.py 위치에 맞게 고칠 것: anonymous_chat_cog.py 맨 위의 db import 줄과 똑같이 맞추면 됨
+from src.utils import db
 
 # ── 설정 ──────────────────────────────────────────────────────────
 UPDATE_INTERVAL = 5                  # 한 채널의 기본(최소) 갱신 주기(초)
@@ -43,9 +47,9 @@ SQL_SELECT_ALL = (
 SQL_INSERT = (
     "INSERT INTO countdowntimer "
     "(message_id, submessage_id, channel_id, creator_id, end_timestamp) "
-    "VALUES ($1, $2, $3, $4, $5)"
+    "VALUES (%s, %s, %s, %s, %s)"
 )
-SQL_DELETE = "DELETE FROM countdowntimer WHERE message_id = $1"
+SQL_DELETE = "DELETE FROM countdowntimer WHERE message_id = %s"
 
 # 카운트다운이 하나라도 있으면 1, 없으면 0
 countdown_switch = 0
@@ -96,7 +100,13 @@ class CountdownCog(commands.Cog):
     async def cog_load(self):
         """봇 시작(재부팅) 시 DB를 한 번만 읽어서 메모리에 채운다."""
         global countdown_switch
-        rows = await self.bot.pool.fetch(SQL_SELECT_ALL)
+        try:
+            rows = await db.fetchall(SQL_SELECT_ALL)
+        except Exception as e:
+            # DB 연결에 문제가 있어도 cog 로드는 계속 진행 (다른 기능/슬래시 명령어 등록이 막히지 않게).
+            # 이 경우 기존 타이머는 메모리에 없으므로 DB를 고친 뒤 봇을 재시작해야 이어진다.
+            print(f"[Countdown] ⚠️ DB에서 타이머를 읽지 못했습니다. 빈 상태로 시작합니다: {e!r}")
+            rows = []
         for r in rows:
             self.timers[r["message_id"]] = Timer(
                 message_id=r["message_id"],
@@ -128,7 +138,7 @@ class CountdownCog(commands.Cog):
         if not self.timers:
             countdown_switch = 0
         try:
-            await self.bot.pool.execute(SQL_DELETE, timer.message_id)
+            await db.execute(SQL_DELETE, (timer.message_id,))
         except Exception as e:
             # DB 삭제에 실패해도 메모리에서는 이미 지워짐.
             # (재부팅하면 다시 로드되지만, 이미 만료 상태면 첫 갱신 때 바로 정리됨)
@@ -293,8 +303,8 @@ class CountdownCog(commands.Cog):
         try:
             main = await channel.send(format_clock(seconds))
             sub = await channel.send(f"<t:{int(time.time())}:R> 업데이트됨")
-            await self.bot.pool.execute(
-                SQL_INSERT, main.id, sub.id, channel.id, interaction.user.id, end_ts
+            await db.execute(
+                SQL_INSERT, (main.id, sub.id, channel.id, interaction.user.id, end_ts)
             )
         except Exception as e:
             print(f"[Countdown] 타이머 생성 실패: {e}")
