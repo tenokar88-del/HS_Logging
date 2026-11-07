@@ -23,7 +23,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 # db.py 위치에 맞게 고칠 것: anonymous_chat_cog.py 맨 위의 db import 줄과 똑같이 맞추면 됨
-from src.utils import db
+from src import db
 
 # ── 설정 ──────────────────────────────────────────────────────────
 UPDATE_INTERVAL = 5                  # 한 채널의 기본(최소) 갱신 주기(초)
