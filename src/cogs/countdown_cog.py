@@ -2,19 +2,30 @@
 countdown_cog.py
 /타이머 {초} — 채널에 이모지 카운트다운 메시지를 만들고 5초마다 갱신
 
-- 채널에 이모지 시계 메시지 1개만 사용 (예: 2️⃣0️⃣<:hs_colon:...>0️⃣0️⃣). 이 메시지의 id 가 message_id.
-- 카운트다운 정보는 DB(countdowntimer)와 봇 메모리(self.timers)에 같이 보관.
+구성
+- 원글 (message_id)    : 이모지 시계 메시지. 5초마다 수정된다.
+- 답글 (submessage_id) : 원글에 달리는 컨트롤 메시지. "<@만든사람>님의 타이머" + [중지]/[재개] 버튼.
+    * [중지] : 카운트다운 정보를 메모리/DB 에서 삭제한다 (메시지는 지우지 않음). 버튼이 [재개]로 바뀐다.
+    * [재개] : 원글의 이모지 시계를 읽어 남은 시간을 구하고, 지금 시각 + 남은 시간으로 카운트다운을 다시 만든다.
+               버튼이 다시 [중지]로 바뀐다.
+    * 버튼은 타이머를 만든 사람만 쓸 수 있다.
+    * 타이머가 종료되면 답글의 버튼을 없앤다.
+- 중지된 타이머는 DB/메모리에 정보가 없다. 재개에 필요한 정보는 메시지에서 읽는다.
+    * 만든 사람 = 답글 내용의 멘션, 원글 = 답글의 reference(답글 대상), 남은 시간 = 원글의 이모지 시계.
+- 활성 타이머는 DB(countdowntimer)와 봇 메모리(self.timers)에 같이 보관한다.
   갱신할 때는 DB를 조회하지 않고 메모리만 사용한다.
 - 전역 변수 countdown_switch: 0이면 갱신 루프가 아무것도 하지 않고, 1이면 동작.
 
 DB 접근은 db.py(psycopg3 풀 헬퍼)의 fetchall / execute 를 사용한다.
 (db.py 에 fetchall 이 추가된 버전이 필요함)
+테이블 컬럼: message_id, submessage_id, channel_id, creator_id, end_timestamp
 """
 
 from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from dataclasses import dataclass
 
@@ -22,7 +33,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-# db.py 위치에 맞게 고칠 것: anonymous_chat_cog.py 맨 위의 db import 줄과 똑같이 맞추면 됨
 from src import db
 
 # ── 설정 ──────────────────────────────────────────────────────────
@@ -36,16 +46,21 @@ MAX_SECONDS = 7 * 86400              # /타이머 에 넣을 수 있는 최대 �
 MAX_TIMERS_PER_CHANNEL = 3           # 한 채널에서 동시에 돌릴 수 있는 타이머 수
 COLON = "<:hs_colon:1568412447646421042>"   # 서버 이모지 (콜론)
 END_MESSAGE = "{mention} 타이머가 종료되었습니다! ⏰"   # 종료 시 보낼 메시지 ({mention} = 만든 사람 멘션)
+CONTROL_MESSAGE = "<@{creator_id}>님의 타이머"          # 답글 내용 (여기서 만든 사람을 다시 읽으므로 형식을 바꾸면 안 됨)
+
+# 봇이 재시작해도 버튼이 동작하도록(persistent view) 고정된 custom_id 를 쓴다
+CUSTOM_ID_STOP = "countdown:stop"
+CUSTOM_ID_RESUME = "countdown:resume"
 
 # 테이블/컬럼 이름이 다르면 여기만 고치면 됨
 SQL_SELECT_ALL = (
-    "SELECT message_id, channel_id, creator_id, end_timestamp "
+    "SELECT message_id, submessage_id, channel_id, creator_id, end_timestamp "
     "FROM countdowntimer"
 )
 SQL_INSERT = (
     "INSERT INTO countdowntimer "
-    "(message_id, channel_id, creator_id, end_timestamp) "
-    "VALUES (%s, %s, %s, %s)"
+    "(message_id, submessage_id, channel_id, creator_id, end_timestamp) "
+    "VALUES (%s, %s, %s, %s, %s)"
 )
 SQL_DELETE = "DELETE FROM countdowntimer WHERE message_id = %s"
 
@@ -54,6 +69,10 @@ countdown_switch = 0
 
 
 # ── 표시 형식 ─────────────────────────────────────────────────────
+
+_KEYCAP_RE = re.compile("([0-9])️?⃣")
+_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
 
 def _emoji_digits(n: int) -> str:
     """정수를 키캡 숫자 이모지로 변환. 12 → 1️⃣2️⃣
@@ -73,12 +92,52 @@ def format_clock(remaining: int) -> str:
     )
 
 
+def parse_clock(content: str) -> int | None:
+    """format_clock 의 반대: 이모지 시계 문자열 → 남은 초. 형식이 맞지 않으면 None."""
+    if not content or COLON not in content:
+        return None
+    left, right = content.split(COLON, 1)
+    minute_digits = _KEYCAP_RE.findall(left)
+    second_digits = _KEYCAP_RE.findall(right)
+    if not minute_digits or len(second_digits) != 2:
+        return None
+    return int("".join(minute_digits)) * 60 + int("".join(second_digits))
+
+
+# ── 버튼 ──────────────────────────────────────────────────────────
+
+class ControlButton(discord.ui.Button):
+    """답글에 붙는 [중지](빨강) / [재개](초록) 버튼. 어느 타이머의 버튼인지는 메시지에서 읽는다."""
+
+    def __init__(self, cog: "CountdownCog", resume: bool):
+        super().__init__(
+            label="재개" if resume else "중지",
+            style=discord.ButtonStyle.success if resume else discord.ButtonStyle.danger,
+            custom_id=CUSTOM_ID_RESUME if resume else CUSTOM_ID_STOP,
+        )
+        self.cog = cog
+        self.resume = resume
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.resume:
+            await self.cog.handle_resume(interaction)
+        else:
+            await self.cog.handle_stop(interaction)
+
+
+def make_view(cog: "CountdownCog", resume: bool) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ControlButton(cog, resume))
+    return view
+
+
 @dataclass
 class Timer:
-    message_id: int
+    message_id: int               # 원글 (이모지 시계)
+    submessage_id: int | None     # 답글 (컨트롤 버튼). 예전 데이터 등은 None 일 수 있음
     channel_id: int
     creator_id: int
-    end_timestamp: int   # 유닉스 초
+    end_timestamp: int            # 유닉스 초
 
 
 class CountdownCog(commands.Cog):
@@ -91,12 +150,20 @@ class CountdownCog(commands.Cog):
         self._tasks: set[asyncio.Task] = set()   # 실행 중인 갱신 작업 (GC 방지용 참조)
         # 만드는 중인 타이머 수 (동시에 /타이머 를 여러 번 눌러도 채널당 한도를 넘지 않게 선점)
         self._creating: dict[int, int] = {}      # channel_id → 생성 진행 중인 개수
+        self._views: list[discord.ui.View] = []  # 등록한 persistent view
 
     # ── 시작/종료 ─────────────────────────────────────────────────
 
     async def cog_load(self):
-        """봇 시작(재부팅) 시 DB를 한 번만 읽어서 메모리에 채운다."""
+        """봇 시작(재부팅) 시 DB를 한 번만 읽어서 메모리에 채우고, 버튼을 등록한다."""
         global countdown_switch
+
+        # 재시작 전에 만든 답글의 버튼도 계속 동작하도록 persistent view 등록
+        for resume in (False, True):
+            view = make_view(self, resume)
+            self.bot.add_view(view)
+            self._views.append(view)
+
         try:
             rows = await db.fetchall(SQL_SELECT_ALL)
         except Exception as e:
@@ -107,6 +174,7 @@ class CountdownCog(commands.Cog):
         for r in rows:
             self.timers[r["message_id"]] = Timer(
                 message_id=r["message_id"],
+                submessage_id=r.get("submessage_id"),
                 channel_id=r["channel_id"],
                 creator_id=r["creator_id"],
                 end_timestamp=r["end_timestamp"],
@@ -119,6 +187,9 @@ class CountdownCog(commands.Cog):
         self.update_loop.cancel()
         for task in list(self._tasks):
             task.cancel()
+        for view in self._views:
+            view.stop()
+        self._views.clear()
 
     # ── 내부 도우미 ───────────────────────────────────────────────
 
@@ -127,18 +198,37 @@ class CountdownCog(commands.Cog):
         channel = self.bot.get_partial_messageable(channel_id)
         return channel.get_partial_message(message_id)
 
-    async def _remove(self, timer: Timer):
-        """메모리와 DB에서 카운트다운 정보를 삭제. 메모리가 비면 스위치 off."""
+    async def _remove(self, timer: Timer) -> bool:
+        """메모리와 DB에서 카운트다운 정보를 삭제. 메모리가 비면 스위치 off.
+        DB 삭제까지 성공하면 True (메모리에서는 항상 지워짐)."""
         global countdown_switch
         self.timers.pop(timer.message_id, None)
         if not self.timers:
             countdown_switch = 0
         try:
             await db.execute(SQL_DELETE, (timer.message_id,))
+            return True
         except Exception as e:
             # DB 삭제에 실패해도 메모리에서는 이미 지워짐.
             # (재부팅하면 다시 로드되지만, 이미 만료 상태면 첫 갱신 때 바로 정리됨)
             print(f"[Countdown] DB 삭제 실패 (message_id={timer.message_id}): {e}")
+            return False
+
+    def _try_reserve(self, channel_id: int) -> bool:
+        """채널당 타이머 수 제한 확인 + 자리 선점. (확인과 선점 사이에 await 이 없어서 동시에 실행돼도 안전)"""
+        active = sum(1 for t in self.timers.values() if t.channel_id == channel_id)
+        reserved = self._creating.get(channel_id, 0)
+        if active + reserved >= MAX_TIMERS_PER_CHANNEL:
+            return False
+        self._creating[channel_id] = reserved + 1
+        return True
+
+    def _release(self, channel_id: int):
+        left = self._creating.get(channel_id, 1) - 1
+        if left > 0:
+            self._creating[channel_id] = left
+        else:
+            self._creating.pop(channel_id, None)
 
     # ── 갱신 스케줄러 ─────────────────────────────────────────────
     # 1초마다 "어느 채널을 갱신할 차례인지"만 메모리에서 확인하고,
@@ -186,7 +276,7 @@ class CountdownCog(commands.Cog):
         """한 채널의 타이머들을 차례로 갱신. 오류가 나도 다른 채널/다음 주기에는 영향 없음."""
         try:
             for timer in channel_timers:
-                if timer.message_id not in self.timers:   # 처리 도중 제거된 경우
+                if timer.message_id not in self.timers:   # 처리 도중 제거된 경우 (중지 등)
                     continue
                 try:
                     await self._update_one(timer)
@@ -204,12 +294,19 @@ class CountdownCog(commands.Cog):
         remaining = math.ceil(timer.end_timestamp - now)
         main = self._partial(timer.channel_id, timer.message_id)
 
-        # 만료: 0:00 표시 → 만든 사람 멘션 → 메모리/DB 삭제
+        # 만료: 0:00 표시 → 답글 버튼 제거 → 만든 사람 멘션 → 메모리/DB 삭제
         if remaining <= 0:
             try:
                 await main.edit(content=format_clock(0))
             except discord.HTTPException as e:
                 print(f"[Countdown] 종료 표시 실패 (message_id={timer.message_id}): {e}")
+
+            # 답글의 [중지] 버튼 없애기 (답글이 이미 지워졌어도 무시)
+            if timer.submessage_id:
+                try:
+                    await self._partial(timer.channel_id, timer.submessage_id).edit(view=None)
+                except discord.HTTPException:
+                    pass
 
             # 타이머를 만든 사람 멘션 (그 사람만 알림, 다른 멘션은 전부 차단)
             try:
@@ -237,7 +334,7 @@ class CountdownCog(commands.Cog):
             if elapsed > 2:   # 진단용: 수정이 느려진 경우만 로그
                 print(f"[Countdown] 느린 수정 감지 (message_id={timer.message_id}): {elapsed:.1f}초")
         except (discord.NotFound, discord.Forbidden) as e:
-            # 메시지가 삭제됐거나 접근 불가 → 정보 삭제
+            # 원글이 삭제됐거나 접근 불가 → 정보 삭제
             print(f"[Countdown] 메시지를 찾을 수 없어 제거 (message_id={timer.message_id}): {e}")
             await self._remove(timer)
         except discord.HTTPException as e:
@@ -261,9 +358,7 @@ class CountdownCog(commands.Cog):
             return
 
         # 채널당 타이머 수 제한 (진행 중인 것 + 지금 만드는 중인 것)
-        active = sum(1 for t in self.timers.values() if t.channel_id == channel.id)
-        reserved = self._creating.get(channel.id, 0)
-        if active + reserved >= MAX_TIMERS_PER_CHANNEL:
+        if not self._try_reserve(channel.id):
             await interaction.response.send_message(
                 f"이 채널에는 타이머를 최대 {MAX_TIMERS_PER_CHANNEL}개까지만 만들 수 있어요. "
                 "진행 중인 타이머가 끝난 뒤에 다시 시도해 주세요.",
@@ -271,16 +366,10 @@ class CountdownCog(commands.Cog):
             )
             return
 
-        # 확인과 선점 사이에 await 이 없으므로 동시에 실행돼도 한도를 넘지 않음
-        self._creating[channel.id] = reserved + 1
         try:
             await self._create_timer(interaction, channel, seconds)
         finally:
-            left = self._creating.get(channel.id, 1) - 1
-            if left > 0:
-                self._creating[channel.id] = left
-            else:
-                self._creating.pop(channel.id, None)
+            self._release(channel.id)
 
     async def _create_timer(
         self,
@@ -293,20 +382,27 @@ class CountdownCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         end_ts = int(time.time()) + seconds
-        main = None
+        main = sub = None
         try:
             main = await channel.send(format_clock(seconds))
+            # 원글에 컨트롤 답글: 멘션은 표시만 하고 알림은 보내지 않음
+            sub = await main.reply(
+                CONTROL_MESSAGE.format(creator_id=interaction.user.id),
+                view=make_view(self, resume=False),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             await db.execute(
-                SQL_INSERT, (main.id, channel.id, interaction.user.id, end_ts)
+                SQL_INSERT, (main.id, sub.id, channel.id, interaction.user.id, end_ts)
             )
         except Exception as e:
             print(f"[Countdown] 타이머 생성 실패: {e!r}")
             # 만들다 만 메시지 정리
-            if main is not None:
-                try:
-                    await main.delete()
-                except Exception:
-                    pass
+            for m in (sub, main):
+                if m is not None:
+                    try:
+                        await m.delete()
+                    except Exception:
+                        pass
             await interaction.followup.send(
                 "타이머를 만들지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True
             )
@@ -314,6 +410,7 @@ class CountdownCog(commands.Cog):
 
         self.timers[main.id] = Timer(
             message_id=main.id,
+            submessage_id=sub.id,
             channel_id=channel.id,
             creator_id=interaction.user.id,
             end_timestamp=end_ts,
@@ -325,6 +422,146 @@ class CountdownCog(commands.Cog):
             await interaction.delete_original_response()
         except Exception:
             pass
+
+    # ── [중지] / [재개] 버튼 ──────────────────────────────────────
+
+    @staticmethod
+    def _read_control(interaction: discord.Interaction) -> tuple[int, int] | None:
+        """버튼이 달린 답글에서 (만든 사람 id, 원글 id) 를 읽는다. 읽을 수 없으면 None.
+        - 만든 사람: 답글 내용의 멘션
+        - 원글: 답글의 reference (답글을 단 대상)
+        → 중지된 타이머는 DB/메모리에 정보가 없어도 이 두 값으로 다시 이어갈 수 있다."""
+        msg = interaction.message
+        if msg is None or msg.reference is None or msg.reference.message_id is None:
+            return None
+        m = _MENTION_RE.search(msg.content or "")
+        if m is None:
+            return None
+        return int(m.group(1)), msg.reference.message_id
+
+    async def handle_stop(self, interaction: discord.Interaction):
+        ctx = self._read_control(interaction)
+        if ctx is None:
+            await interaction.response.send_message("이 타이머의 정보를 읽을 수 없어요.", ephemeral=True)
+            return
+        creator_id, main_id = ctx
+
+        if interaction.user.id != creator_id:
+            await interaction.response.send_message("타이머를 만든 사람만 사용할 수 있어요.", ephemeral=True)
+            return
+
+        timer = self.timers.get(main_id)
+        if timer is None:
+            await interaction.response.send_message("이미 중지됐거나 끝난 타이머예요.", ephemeral=True)
+            return
+
+        remaining = math.ceil(timer.end_timestamp - time.time())
+        if remaining <= 0:
+            await interaction.response.send_message("곧 끝나는 타이머라 중지할 수 없어요.", ephemeral=True)
+            return
+
+        await interaction.response.defer()   # 3초 안에 응답해야 하므로 먼저 확인 응답
+
+        # 메모리 + DB 에서 정보 삭제 (메시지는 지우지 않음)
+        db_ok = await self._remove(timer)
+
+        # 원글에 중지한 순간의 남은 시간을 정확히 표시.
+        # (마지막 갱신이 최대 몇 초 전일 수 있어서, 이렇게 해야 [재개]가 정확한 시간부터 이어진다)
+        try:
+            await self._partial(timer.channel_id, main_id).edit(content=format_clock(remaining))
+        except discord.HTTPException as e:
+            print(f"[Countdown] 중지 시 원글 수정 실패 (message_id={main_id}): {e}")
+
+        # 답글 버튼을 [재개]로
+        try:
+            await interaction.edit_original_response(view=make_view(self, resume=True))
+        except discord.HTTPException as e:
+            print(f"[Countdown] 중지 시 답글 수정 실패 (message_id={main_id}): {e}")
+
+        if not db_ok:
+            await interaction.followup.send(
+                "타이머는 중지했지만 DB 삭제에 실패했어요. 봇이 재시작되면 다시 시작될 수 있어요.",
+                ephemeral=True,
+            )
+
+    async def handle_resume(self, interaction: discord.Interaction):
+        global countdown_switch
+
+        ctx = self._read_control(interaction)
+        if ctx is None:
+            await interaction.response.send_message("이 타이머의 정보를 읽을 수 없어요.", ephemeral=True)
+            return
+        creator_id, main_id = ctx
+
+        if interaction.user.id != creator_id:
+            await interaction.response.send_message("타이머를 만든 사람만 사용할 수 있어요.", ephemeral=True)
+            return
+
+        if main_id in self.timers:
+            await interaction.response.send_message("이미 진행 중인 타이머예요.", ephemeral=True)
+            return
+
+        channel_id = interaction.channel_id
+        if channel_id is None:
+            await interaction.response.send_message("이 채널에서는 사용할 수 없어요.", ephemeral=True)
+            return
+
+        # 재개해도 채널당 진행 중인 타이머 수 제한은 그대로 적용
+        if not self._try_reserve(channel_id):
+            await interaction.response.send_message(
+                f"이 채널에는 타이머를 최대 {MAX_TIMERS_PER_CHANNEL}개까지만 돌릴 수 있어요. "
+                "다른 타이머가 끝난 뒤에 다시 시도해 주세요.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await interaction.response.defer()
+
+            # 원글의 이모지 시계를 읽어서 남은 시간을 구한다
+            try:
+                original = await self._partial(channel_id, main_id).fetch()
+            except discord.NotFound:
+                await interaction.followup.send("원글이 삭제돼서 재개할 수 없어요.", ephemeral=True)
+                return
+            except discord.HTTPException as e:
+                print(f"[Countdown] 재개 시 원글 읽기 실패 (message_id={main_id}): {e}")
+                await interaction.followup.send("원글을 읽지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+                return
+
+            remaining = parse_clock(original.content)
+            if not remaining:   # None(형식 오류) 또는 0
+                await interaction.followup.send("남은 시간을 읽을 수 없어서 재개할 수 없어요.", ephemeral=True)
+                return
+
+            end_ts = int(time.time()) + remaining
+            try:
+                # 혹시 남아 있을 수 있는 이전 행을 먼저 정리하고 새로 기록
+                await db.execute(SQL_DELETE, (main_id,))
+                await db.execute(
+                    SQL_INSERT, (main_id, interaction.message.id, channel_id, creator_id, end_ts)
+                )
+            except Exception as e:
+                print(f"[Countdown] 재개 시 DB 기록 실패 (message_id={main_id}): {e!r}")
+                await interaction.followup.send("타이머를 재개하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+                return
+
+            self.timers[main_id] = Timer(
+                message_id=main_id,
+                submessage_id=interaction.message.id,
+                channel_id=channel_id,
+                creator_id=creator_id,
+                end_timestamp=end_ts,
+            )
+            countdown_switch = 1
+
+            # 답글 버튼을 다시 [중지]로
+            try:
+                await interaction.edit_original_response(view=make_view(self, resume=False))
+            except discord.HTTPException as e:
+                print(f"[Countdown] 재개 시 답글 수정 실패 (message_id={main_id}): {e}")
+        finally:
+            self._release(channel_id)
 
 
 async def setup(bot: commands.Bot):
